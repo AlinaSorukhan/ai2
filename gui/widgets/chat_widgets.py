@@ -1,47 +1,13 @@
 from PyQt6.QtCore import Qt
-from PyQt6.QtGui import QImage, QPainter, QPixmap
-from PyQt6.QtSvg import QSvgRenderer
+from PyQt6.QtGui import QPixmap
 from PyQt6.QtWidgets import QFrame, QHBoxLayout, QLabel, QVBoxLayout
+
+from ..icon_loader import load_pixmap
 
 
 # ============================ КАРТКА ПОВІДОМЛЕННЯ ЧАТУ ============================
 class ChatCard(QFrame):
     """A message card used as a visual placeholder in the prototype."""
-
-    # Завантаження і впорядкування SVG/PNG-іконок усередині картки.
-    @staticmethod
-    def load_pixmap(path: str, size: int) -> QPixmap:
-        if path.lower().endswith(".svg"):
-            renderer = QSvgRenderer(path)
-            if not renderer.isValid():
-                return QPixmap()
-            canvas_size = max(size * 4, 64)
-            image = QImage(canvas_size, canvas_size, QImage.Format.Format_ARGB32)
-            image.fill(Qt.GlobalColor.transparent)
-            painter = QPainter(image)
-            renderer.render(painter)
-            painter.end()
-            pixmap = QPixmap.fromImage(image)
-        else:
-            pixmap = QPixmap(path)
-
-        if pixmap.isNull():
-            return QPixmap()
-
-        image = pixmap.toImage().convertToFormat(QImage.Format.Format_RGBA8888)
-        left, top, right, bottom = image.width(), image.height(), -1, -1
-        for y in range(image.height()):
-            for x in range(image.width()):
-                if image.pixelColor(x, y).alpha() >= 24:
-                    left = min(left, x)
-                    top = min(top, y)
-                    right = max(right, x)
-                    bottom = max(bottom, y)
-
-        if right >= left and bottom >= top:
-            pixmap = QPixmap.fromImage(image.copy(left, top, right - left + 1, bottom - top + 1))
-
-        return pixmap.scaled(size, size, Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation)
 
     def __init__(
         self,
@@ -66,7 +32,7 @@ class ChatCard(QFrame):
         icon_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         icon_label.setFixedSize(28, 28)
         if icon.lower().endswith((".svg", ".png")):
-            icon_label.setPixmap(self.load_pixmap(icon, 20))
+            icon_label.setPixmap(load_pixmap(icon, 20))
         else:
             icon_label.setText(icon)
         layout.addWidget(icon_label, 0, Qt.AlignmentFlag.AlignTop)
@@ -87,7 +53,7 @@ class ChatCard(QFrame):
             if status_icon:
                 status_icon_label = QLabel()
                 status_icon_label.setFixedSize(16, 16)
-                status_icon_label.setPixmap(self.load_pixmap(status_icon, 14))
+                status_icon_label.setPixmap(load_pixmap(status_icon, 14))
                 header_layout.addWidget(status_icon_label)
 
             status_label = QLabel(status)

@@ -8,8 +8,7 @@ from pathlib import Path
 from typing import Any, cast
 
 from PyQt6.QtCore import QObject, QPoint, QRunnable, QSize, Qt, QThreadPool, QTimer, pyqtSignal
-from PyQt6.QtGui import QIcon, QImage, QKeyEvent, QMouseEvent, QPainter, QPixmap, QResizeEvent, QKeySequence, QShortcut
-from PyQt6.QtSvg import QSvgRenderer
+from PyQt6.QtGui import QIcon, QKeyEvent, QMouseEvent, QPixmap, QResizeEvent, QKeySequence, QShortcut
 from PyQt6.QtWidgets import (
     QFrame,
     QHBoxLayout,
@@ -26,6 +25,7 @@ from PyQt6.QtWidgets import (
     QSplitter,
 )
 
+from .icon_loader import icon_path as resolve_icon_path, load_pixmap
 from .widgets.chat_widgets import ChatCard
 from utils.voicing_answer import GUI_TEXT_MODE
 
@@ -350,50 +350,14 @@ class MainWindow(QMainWindow):
 
     # ============================ РОБОТА З ІКОНКАМИ ============================
     def icon_path(self, name: str) -> Path:
-        assets = Path(__file__).parent / "assets"
-        png_path = assets / "png" / f"{Path(name).stem}.png"
-        if png_path.exists():
-            return png_path
-        return assets / name
+        return resolve_icon_path(name)
 
     def make_icon(self, name: str, size: int = 20) -> QIcon:
         pixmap = self.make_pixmap(name, size)
         return QIcon(pixmap)
 
     def make_pixmap(self, name: str, size: int) -> QPixmap:
-        path = self.icon_path(name)
-        if path.suffix.lower() == ".svg":
-            renderer = QSvgRenderer(str(path))
-            if not renderer.isValid():
-                return QPixmap()
-            canvas_size = max(size * 4, 64)
-            image = QImage(canvas_size, canvas_size, QImage.Format.Format_ARGB32)
-            image.fill(Qt.GlobalColor.transparent)
-            painter = QPainter(image)
-            renderer.render(painter)
-            painter.end()
-            pixmap = QPixmap.fromImage(image)
-        else:
-            pixmap = QPixmap(str(path))
-
-        if pixmap.isNull():
-            return QPixmap()
-
-        image = pixmap.toImage().convertToFormat(QImage.Format.Format_RGBA8888)
-        rect = image.size().boundedTo(QSize(image.width(), image.height()))
-        left, top, right, bottom = rect.width(), rect.height(), -1, -1
-        for y in range(rect.height()):
-            for x in range(rect.width()):
-                if image.pixelColor(x, y).alpha() >= 24:
-                    left = min(left, x)
-                    top = min(top, y)
-                    right = max(right, x)
-                    bottom = max(bottom, y)
-
-        if right >= left and bottom >= top:
-            pixmap = QPixmap.fromImage(image.copy(left, top, right - left + 1, bottom - top + 1))
-
-        return pixmap.scaled(size, size, Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation)
+        return load_pixmap(self.icon_path(name), size)
 
     # ============================ ОСНОВНА КОМПОНОВКА ВІКНА ============================
     def _build_ui(self) -> None:
@@ -428,7 +392,7 @@ class MainWindow(QMainWindow):
 
         # Верхня ліва частина без окремого фонового прямокутника.
         brand_icon = QLabel()
-        brand_icon.setPixmap(self.make_pixmap("logo_assistant.svg", 22))
+        brand_icon.setPixmap(self.make_pixmap("branding/logo_assistant.svg", 22))
         brand_icon.setFixedWidth(28)
         brand_icon.setStyleSheet("background: transparent; border: none;")
         layout.addWidget(brand_icon)
@@ -447,9 +411,9 @@ class MainWindow(QMainWindow):
         actions_layout.setSpacing(4)
 
         title_actions = (
-            ("hide_window.svg", self.showMinimized),
-            ("full_window.svg", self.toggle_maximize),
-            ("close_winow.svg", self.close),
+            ("window/hide_window.svg", self.showMinimized),
+            ("window/full_window.svg", self.toggle_maximize),
+            ("window/close_winow.svg", self.close),
         )
         for icon_name, callback in title_actions:
             button = QToolButton()
@@ -510,9 +474,9 @@ class MainWindow(QMainWindow):
         # Основні розділи бічної панелі.
         sidebar_buttons = []
         for icon_name, title, active in (
-            ("home.svg", "Головна", True),
-            ("user_ico.svg", "Профіль", False),
-            ("settings.svg", "Налаштування", False),
+            ("navigation/home.svg", "Головна", True),
+            ("chat/user_ico.svg", "Профіль", False),
+            ("navigation/settings.svg", "Налаштування", False),
         ):
             button = QToolButton()
             button.setIcon(self.make_icon(icon_name, 22))
@@ -617,9 +581,9 @@ class MainWindow(QMainWindow):
         if self._chat_layout is None:
             raise RuntimeError("Chat area is not initialized")
 
-        icon_name = "user_ico.svg" if is_user else "bot_ico.svg"
+        icon_name = "chat/user_ico.svg" if is_user else "chat/bot_ico.svg"
         if author == "System":
-            icon_name = "info.svg"
+            icon_name = "chat/info.svg"
         card = ChatCard(
             author,
             body.strip(),
@@ -627,7 +591,7 @@ class MainWindow(QMainWindow):
             str(self.icon_path(icon_name)),
             is_user=is_user,
             status=status,
-            status_icon=str(self.icon_path("status.svg")) if status else None,
+            status_icon=str(self.icon_path("status/status.svg")) if status else None,
         )
         insert_at = max(0, self._chat_layout.count() - 1)
         self._chat_layout.insertWidget(insert_at, card)
@@ -786,7 +750,7 @@ class MainWindow(QMainWindow):
     def _set_microphone_icon(self, active: bool) -> None:
         if self._mic_button is None:
             return
-        icon_name = "micro.svg" if active else "micro_off.svg"
+        icon_name = "controls/micro.svg" if active else "controls/micro_off.svg"
         self._mic_button.setIcon(self.make_icon(icon_name, 20))
 
     # ============================ РЯДОК ПОШУКУ НАД ЧАТОМ ============================
@@ -799,7 +763,7 @@ class MainWindow(QMainWindow):
 
         # Іконка пошуку ліворуч у рядку пошуку.
         search_icon = QLabel()
-        search_icon.setPixmap(self.make_pixmap("search.svg", 16))
+        search_icon.setPixmap(self.make_pixmap("controls/search.svg", 16))
         layout.addWidget(search_icon)
 
         search = QLineEdit()
@@ -836,7 +800,7 @@ class MainWindow(QMainWindow):
 
         # Ліва кнопка системної дієї прив’язана до нижнього краю поля.
         keyboard = QPushButton()
-        keyboard.setIcon(self.make_icon("system_enter.svg", 20))
+        keyboard.setIcon(self.make_icon("controls/system_enter.svg", 20))
         keyboard.setIconSize(QSize(20, 20))
         keyboard.setObjectName("keyboardButton")
         keyboard.setFixedSize(32, 32)
@@ -851,7 +815,7 @@ class MainWindow(QMainWindow):
         composer_layout.addWidget(prompt, 1, Qt.AlignmentFlag.AlignVCenter)
 
         mic = QPushButton()
-        mic.setIcon(self.make_icon("micro_off.svg", 20))
+        mic.setIcon(self.make_icon("controls/micro_off.svg", 20))
         mic.setIconSize(QSize(20, 20))
         mic.setObjectName("micButton")
         mic.setFixedSize(32, 32)
