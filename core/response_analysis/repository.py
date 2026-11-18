@@ -51,6 +51,7 @@ class ResponseRepository:
                 ("згодні", ResponseCategory.CONFIRMATION, 1.0),
                 ("погоджуюсь", ResponseCategory.CONFIRMATION, 1.0),
                 ("погоджуюся", ResponseCategory.CONFIRMATION, 1.0),
+                ("підтверджую", ResponseCategory.CONFIRMATION, 1.0),
                 ("ок", ResponseCategory.CONFIRMATION, 1.0),
                 ("окей", ResponseCategory.CONFIRMATION, 1.0),
                 ("okay", ResponseCategory.CONFIRMATION, 1.0),

@@ -456,6 +456,11 @@ def test_app_command_accepts_verb_forms(tmp_path, spoken_verb, is_open):
             "get_known_apps",
             return_value={"Steam": "C:\\Apps\\steam.exe"},
         ),
+        patch.object(
+            run_assistant,
+            "get_open_apps",
+            return_value={"Steam": "C:\\Apps\\steam.exe"},
+        ),
         patch.object(run_assistant, "is_unknown", return_value=False),
         patch.object(run_assistant, "register_found_app"),
         patch.object(run_assistant, "voicing_and_printing_answer"),
@@ -649,6 +654,11 @@ def test_close_app_verb_passes_shortcut_path_to_close_handler(tmp_path):
             "get_known_apps",
             return_value={"Telegram": shortcut},
         ),
+        patch.object(
+            run_assistant,
+            "get_open_apps",
+            return_value={"Telegram": shortcut},
+        ),
         patch.object(run_assistant, "is_unknown", return_value=False),
         patch.object(run_assistant, "register_found_app"),
         patch.object(command, "close_app") as close_app,
@@ -791,6 +801,11 @@ def _open_known_app(command, spoken="відкрий програму Steam"):
             "get_known_apps",
             return_value={"Steam": "C:\\Apps\\steam.exe"},
         ),
+        patch.object(
+            run_assistant,
+            "get_open_apps",
+            return_value={"Steam": "C:\\Apps\\steam.exe"},
+        ),
         patch.object(run_assistant, "is_unknown", return_value=False),
         patch.object(run_assistant, "register_found_app") as register,
         patch.object(run_assistant, "voicing_and_printing_answer"),
@@ -888,6 +903,93 @@ def test_fuzzy_app_search_lists_suggestions_without_speaking_them(tmp_path):
         path="C:\\Apps\\steam.exe",
     )
     assert command.pending_app is None
+
+
+def test_fuzzy_app_close_search_uses_only_running_apps(tmp_path):
+    command, open_app = make_command(tmp_path, [])
+    installed_apps = {
+        "Steam": r"C:\Apps\steam.exe",
+        "Steam Tools": r"C:\Apps\steam-tools.exe",
+        "Discord": r"C:\Apps\discord.exe",
+    }
+    running_apps = {"Steam": r"C:\Apps\steam.exe"}
+    suggestions = [("Steam", r"C:\Apps\steam.exe")]
+
+    with (
+        patch.object(run_assistant, "get_known_apps", return_value=installed_apps),
+        patch.object(run_assistant, "get_app_open_counts", return_value={}),
+        patch.object(
+            run_assistant,
+            "get_open_apps",
+            return_value=running_apps,
+        ) as get_open_apps,
+        patch.object(run_assistant, "find_exact_match", return_value=None),
+        patch.object(
+            run_assistant,
+            "find_similar_apps",
+            return_value=suggestions,
+        ) as find_similar,
+        patch.object(run_assistant, "run_voice"),
+        patch.object(run_assistant, "voicing_and_printing_answer"),
+    ):
+        command.handle_open_close("закрий Steem", is_open=False)
+
+    get_open_apps.assert_called_once_with(installed_apps)
+    assert find_similar.call_args.kwargs["apps"] == running_apps
+    assert command.pending_app is not None
+    assert command.pending_app["suggestions"] == suggestions
+    open_app.assert_not_called()
+
+
+def test_exact_app_close_search_uses_only_running_apps(tmp_path):
+    command, open_app = make_command(tmp_path, [])
+    installed_apps = {
+        "Steam": r"C:\Apps\steam.exe",
+        "Discord": r"C:\Apps\discord.exe",
+    }
+    running_apps = {"Steam": r"C:\Apps\steam.exe"}
+
+    with (
+        patch.object(run_assistant, "get_known_apps", return_value=installed_apps),
+        patch.object(
+            run_assistant,
+            "get_open_apps",
+            return_value=running_apps,
+        ) as get_open_apps,
+        patch.object(run_assistant, "get_app_open_counts", return_value={}),
+        patch.object(run_assistant, "find_exact_match", return_value=None) as find_exact,
+        patch.object(run_assistant, "find_similar_apps", return_value=[]),
+        patch.object(run_assistant, "voicing_and_printing_answer") as speak,
+    ):
+        command.handle_open_close("закрий Discord", is_open=False)
+
+    get_open_apps.assert_called_once_with(installed_apps)
+    assert find_exact.call_args.kwargs["apps"] == running_apps
+    assert "Не знайшла відкриту програму" in speak.call_args.args[0]
+    open_app.assert_not_called()
+
+
+def test_fuzzy_app_close_reports_when_no_similar_open_apps(tmp_path):
+    command, open_app = make_command(tmp_path, [])
+
+    with (
+        patch.object(
+            run_assistant,
+            "get_known_apps",
+            return_value={"Steam": r"C:\Apps\steam.exe"},
+        ),
+        patch.object(run_assistant, "get_app_open_counts", return_value={}),
+        patch.object(run_assistant, "get_open_apps", return_value={}) as get_open_apps,
+        patch.object(run_assistant, "find_exact_match", return_value=None),
+        patch.object(run_assistant, "find_similar_apps", return_value=[]) as find_similar,
+        patch.object(run_assistant, "voicing_and_printing_answer") as speak,
+    ):
+        command.handle_open_close("закрий Steem", is_open=False)
+
+    get_open_apps.assert_called_once()
+    assert find_similar.call_args.kwargs["apps"] == {}
+    assert "Не знайшла відкриту програму" in speak.call_args.args[0]
+    open_app.assert_not_called()
 
 
 def test_out_of_range_app_number_is_ignored_and_selection_reprompted(tmp_path):

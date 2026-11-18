@@ -1,5 +1,6 @@
 from typing import Any, cast
 import re
+import threading
 
 from utils.list_apps import get_list_installed_apps
 from django.core.management.base import BaseCommand
@@ -7,6 +8,7 @@ import speech_recognition
 from utils.match_app import (
     find_exact_match,
     find_similar_apps,
+    get_open_apps,
     get_app_open_counts,
     get_known_apps,
     sync_installed_apps,
@@ -25,6 +27,7 @@ from utils.file_explorer import (
     find_open_explorer_folders,
     find_file_targets,
     find_file_targets_in_folder,
+    find_named_file_targets,
     find_similar_file_targets,
     get_active_explorer_path,
     get_active_explorer_subfolders,
@@ -32,6 +35,7 @@ from utils.file_explorer import (
     navigate_explorer_back,
     navigate_explorer_to,
     open_target,
+    parse_find_file_command,
     parse_open_target_command,
 )
 from utils.text_similarity import similarity
@@ -111,6 +115,7 @@ class Command(BaseCommand):
         self.pending_file: dict[str, Any] | None = None
         self.unrecognized_audio_prompted = False
         self.pending_learning_candidate: ResponseCandidate | None = None
+        self.cancel_event = threading.Event()
         self.response_repository = ResponseRepository()
         self.response_analyzer = ResponseAnalyzer(self.response_repository)
         self.response_learner = ResponseLearner(self.response_repository)
@@ -166,6 +171,7 @@ class Command(BaseCommand):
             return None
 
     def doing_task(self, text):
+        self._raise_if_cancelled()
         lowered = text.strip().lower()
 
         if (
@@ -215,6 +221,7 @@ class Command(BaseCommand):
                     text,
                     new_window=pending_file.get("new_window", False),
                     current_folder=pending_file.get("current_folder", False),
+                    open_parent=pending_file.get("open_parent", False),
                 )
                 return
             if pending_file.get("awaiting_explorer_folder_name"):
@@ -236,7 +243,6 @@ class Command(BaseCommand):
             voicing_and_printing_answer("Привіт, рада тебе бачити!")
             return
 
-        # Убрал озвучивание
         if "додатки" in lowered:
             self.stdout.write("Отримую список додатків...")
             apps = get_list_installed_apps()
@@ -260,6 +266,11 @@ class Command(BaseCommand):
         if forward_match:
             requested_name = text[forward_match.end():].strip(" \t.,!?;:")
             self.navigate_explorer_forward(requested_name=requested_name)
+            return
+
+        find_file_target = parse_find_file_command(text)
+        if find_file_target is not None:
+            self.handle_file_open("file", find_file_target, open_parent=True)
             return
 
         target_command = parse_open_target_command(text)
@@ -313,7 +324,7 @@ class Command(BaseCommand):
         first_word = normalized.split(maxsplit=1)[0]
         return first_word in CANCEL_ACTION_WORDS
 
-    def cancel_pending_action(self):
+    def cancel_pending_action(self, silent: bool = False):
         pending_app = self.pending_app
         self.pending_app = None
         self.pending_learning_candidate = None
@@ -324,12 +335,14 @@ class Command(BaseCommand):
             return
 
         if pending_file is not None:
-            voicing_and_printing_answer("Добре, скасувала відкриття.")
+            if not silent:
+                voicing_and_printing_answer("Добре, скасувала відкриття.")
         elif pending_app is not None:
             action = "відкриття" if pending_app["is_open"] else "закриття"
-            voicing_and_printing_answer(
-                f"Добре, скасувала {action} програми {pending_app.get('name', '')}."
-            )
+            if not silent:
+                voicing_and_printing_answer(
+                    f"Добре, скасувала {action} програми {pending_app.get('name', '')}."
+                )
 
     def handle_unrecognized_audio(self) -> None:
         pending_file = getattr(self, "pending_file", None)
@@ -530,6 +543,7 @@ class Command(BaseCommand):
         target: str,
         new_window: bool = False,
         current_folder: bool = False,
+        open_parent: bool = False,
     ) -> None:
         if not target.strip():
             self.pending_file = {
@@ -537,12 +551,19 @@ class Command(BaseCommand):
                 "awaiting_target": True,
                 "new_window": new_window,
                 "current_folder": current_folder,
+                "open_parent": open_parent,
             }
             label = "файл" if kind == "file" else "папку"
-            voicing_and_printing_answer(f"Вкажіть {label}, який потрібно відкрити.")
+            if open_parent:
+                voicing_and_printing_answer(
+                    f"Вкажіть назву {label}, папку якого потрібно відкрити."
+                )
+            else:
+                voicing_and_printing_answer(f"Вкажіть {label}, який потрібно відкрити.")
             return
 
         folder = None
+        cancel_event = getattr(self, "cancel_event", None)
         if current_folder:
             try:
                 folder = get_active_explorer_path()
@@ -561,19 +582,39 @@ class Command(BaseCommand):
                 )
                 return
         else:
-            targets = find_file_targets(target, expected_kind=kind)
+            targets = (
+                find_named_file_targets(target, cancellation_event=cancel_event)
+                if open_parent
+                else find_file_targets(
+                    target,
+                    expected_kind=kind,
+                    cancellation_event=cancel_event,
+                )
+            )
+        self._raise_if_cancelled()
         if not targets:
             roots = [folder] if folder is not None else None
             suggestions = (
-                find_similar_file_targets(target, roots=roots, expected_kind=kind)
+                find_similar_file_targets(
+                    target,
+                    roots=roots,
+                    expected_kind=kind,
+                    cancellation_event=cancel_event,
+                )
                 if current_folder
-                else find_similar_file_targets(target, expected_kind=kind)
+                else find_similar_file_targets(
+                    target,
+                    expected_kind=kind,
+                    cancellation_event=cancel_event,
+                )
             )
+            self._raise_if_cancelled()
             if suggestions:
                 self.pending_file = {
                     "awaiting_selection": True,
                     "targets": suggestions,
                     "new_window": new_window,
+                    "open_parent": open_parent,
                 }
                 self.prompt_file_selection(suggestions, prefix="Не знайшла точний збіг.")
                 return
@@ -586,7 +627,7 @@ class Command(BaseCommand):
                 )
             else:
                 voicing_and_printing_answer(
-                    f"Не знайшла {label} «{target}» у стандартних папках. "
+                    f"Не знайшла {label} «{target}» у папках користувача. "
                     "Введіть повний шлях або уточніть назву елемента."
                 )
             return
@@ -596,11 +637,15 @@ class Command(BaseCommand):
                 "awaiting_selection": True,
                 "targets": targets,
                 "new_window": new_window,
+                "open_parent": open_parent,
             }
             self.prompt_file_selection(targets, prefix="Знайшла кілька точних збігів.")
             return
 
-        self.open_file_target(targets[0], new_window=new_window)
+        selected_target = targets[0]
+        if open_parent:
+            selected_target = os.path.dirname(selected_target)
+        self.open_file_target(selected_target, new_window=new_window)
 
     def prompt_file_selection(self, targets: list[str], prefix: str) -> None:
         choices = "; ".join(
@@ -632,7 +677,7 @@ class Command(BaseCommand):
         pending_file["selected_target"] = selected_target
         voicing_and_printing_answer(
             f"Ви обрали {os.path.basename(selected_target)}. "
-            "Підтвердіть відкриття: так або ні."
+            "Підтвердіть відкриття: «так» або «відкрий», або скасуйте вибір."
         )
 
     def handle_file_selection_confirmation(self, text: str) -> None:
@@ -644,7 +689,8 @@ class Command(BaseCommand):
         analysis = self.analyze_response(text, question=question)
         if analysis.category == ResponseCategory.UNKNOWN:
             voicing_and_printing_answer(
-                "Не зрозуміла відповідь. Підтвердіть відкриття вибраного варіанта: так або ні."
+                "Не зрозуміла відповідь. Скажіть «так» або «відкрий», "
+                "щоб відкрити вибраний варіант, або скасуйте вибір."
             )
             return
         if analysis.category == ResponseCategory.REJECTION:
@@ -661,6 +707,8 @@ class Command(BaseCommand):
 
         selected_target = pending_file["selected_target"]
         new_window = pending_file.get("new_window", False)
+        if pending_file.get("open_parent", False):
+            selected_target = os.path.dirname(selected_target)
         self.pending_file = None
         self.open_file_target(selected_target, new_window=new_window)
 
@@ -687,6 +735,7 @@ class Command(BaseCommand):
         return valid_indices.pop()
 
     def open_file_target(self, path: str, new_window: bool = False) -> None:
+        self._raise_if_cancelled()
         label = (
             "Провідник"
             if path == "explorer"
@@ -704,6 +753,11 @@ class Command(BaseCommand):
             voicing_and_printing_answer(f"Не вдалося відкрити {label}.")
             return
         voicing_and_printing_answer(f"Відкриваю {label}.")
+
+    def _raise_if_cancelled(self) -> None:
+        cancel_event = getattr(self, "cancel_event", None)
+        if cancel_event is not None and cancel_event.is_set():
+            raise InterruptedError
 
     def close_explorer(self) -> None:
         try:
@@ -962,24 +1016,30 @@ class Command(BaseCommand):
 
         voicing_and_printing_answer("Починаю шукати програму...")
         apps = get_known_apps()
-        open_counts = get_app_open_counts(apps.keys())
+        searchable_apps = apps if is_open else get_open_apps(apps)
+        open_counts = get_app_open_counts(searchable_apps.keys())
         exact_match = find_exact_match(
             word=target_word,
-            apps=apps,
+            apps=searchable_apps,
             open_counts=open_counts,
         )
 
         if exact_match is None:
             suggestions = find_similar_apps(
                 word=target_word,
-                apps=apps,
+                apps=searchable_apps,
                 threshold=0.45,
                 open_counts=open_counts,
             )
             if not suggestions:
-                voicing_and_printing_answer(
-                    f"Я не знайшла програму схожу на {target_word}"
-                )
+                if is_open:
+                    voicing_and_printing_answer(
+                        f"Я не знайшла програму схожу на {target_word}"
+                    )
+                else:
+                    voicing_and_printing_answer(
+                        f"Не знайшла відкриту програму, схожу на {target_word}."
+                    )
                 return
 
             self.pending_app = {

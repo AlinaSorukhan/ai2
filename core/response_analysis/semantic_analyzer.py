@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import logging
+from collections.abc import Callable
 from typing import TYPE_CHECKING, Literal, Optional
 
 import numpy as np
@@ -18,16 +20,37 @@ class SemanticAnalyzer:
         self.repository = repository
         self.config = config or ResponseAnalysisConfig()
         self.model: SentenceTransformer | Literal[False] | None = None
+        self.model_loading_callback: Callable[[bool], None] | None = None
+
+    def set_model_loading_callback(
+        self,
+        callback: Callable[[bool], None] | None,
+    ) -> Callable[[bool], None] | None:
+        previous_callback = self.model_loading_callback
+        self.model_loading_callback = callback
+        return previous_callback
 
     def _ensure_model(self) -> SentenceTransformer | Literal[False]:
         if self.model is not None:
             return self.model
+        hub_http_logger = logging.getLogger("huggingface_hub.utils._http")
+        previous_log_level = hub_http_logger.level
+        if self.model_loading_callback is not None:
+            self.model_loading_callback(True)
         try:
+            hub_http_logger.setLevel(logging.ERROR)
+            from transformers.utils.logging import disable_progress_bar
+
+            disable_progress_bar()
             from sentence_transformers import SentenceTransformer
 
             self.model = SentenceTransformer("sentence-transformers/all-MiniLM-L6-v2")
         except Exception:
             self.model = False
+        finally:
+            hub_http_logger.setLevel(previous_log_level)
+            if self.model_loading_callback is not None:
+                self.model_loading_callback(False)
         return self.model
 
     def _fallback_embedding(self, text: str, vocabulary: list[str]) -> np.ndarray:

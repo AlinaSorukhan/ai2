@@ -1,3 +1,7 @@
+import logging
+import sys
+from types import ModuleType
+
 import pytest
 from django.test import override_settings
 from sqlalchemy import select
@@ -35,7 +39,7 @@ def test_repository_default_uses_django_database(tmp_path):
         repository = ResponseRepository()
 
     assert repository.engine.url.database == str(database_path)
-    assert len(repository.get_all()) == 46
+    assert len(repository.get_all()) == 47
     repository.engine.dispose()
 
 
@@ -69,6 +73,59 @@ def test_semantic_analyzer_handles_near_variants(tmp_path):
     assert rejection.category == ResponseCategory.UNKNOWN or rejection.category == ResponseCategory.REJECTION
 
 
+def test_model_loading_suppresses_hub_warning_and_progress_bar(
+    tmp_path,
+    monkeypatch,
+    caplog,
+):
+    repository = make_repository(tmp_path)
+    analyzer = SemanticAnalyzer(repository)
+    model = object()
+    loading_states = []
+    analyzer.model_loading_callback = loading_states.append
+    http_logger = logging.getLogger("huggingface_hub.utils._http")
+    disabled_progress = []
+    transformers_package = ModuleType("transformers")
+    transformers_utils = ModuleType("transformers.utils")
+    transformers_logging = ModuleType("transformers.utils.logging")
+    transformers_logging.disable_progress_bar = lambda: disabled_progress.append(True)
+    transformers_utils.logging = transformers_logging
+    transformers_package.utils = transformers_utils
+    monkeypatch.setitem(sys.modules, "transformers", transformers_package)
+    monkeypatch.setitem(sys.modules, "transformers.utils", transformers_utils)
+    monkeypatch.setitem(
+        sys.modules,
+        "transformers.utils.logging",
+        transformers_logging,
+    )
+
+    def create_model(_model_name):
+        http_logger.warning(
+            "You are sending unauthenticated requests to the HF Hub."
+        )
+        return model
+
+    sentence_transformers = ModuleType("sentence_transformers")
+    sentence_transformers.SentenceTransformer = create_model
+    monkeypatch.setitem(
+        sys.modules,
+        "sentence_transformers",
+        sentence_transformers,
+    )
+    monkeypatch.setattr(http_logger, "level", logging.WARNING)
+
+    with caplog.at_level(logging.WARNING):
+        assert analyzer._ensure_model() is model
+
+    assert disabled_progress == [True]
+    assert loading_states == [True, False]
+    assert http_logger.level == logging.WARNING
+    assert not any(
+        "unauthenticated requests" in record.getMessage()
+        for record in caplog.records
+    )
+
+
 def test_decision_engine_resolves_negation_conflict(tmp_path):
     repository = make_repository(tmp_path)
     engine = DecisionEngine(repository)
@@ -85,6 +142,43 @@ def test_decision_engine_recognizes_permission_as_builtin_confirmation(tmp_path)
 
     assert result.category == ResponseCategory.CONFIRMATION
     assert result.source.value == "RULE"
+
+
+@pytest.mark.parametrize("answer", ["відкрий", "відкривай", "відкрий файл", "відкрийте"])
+def test_decision_engine_recognizes_open_command_as_confirmation(tmp_path, answer):
+    engine = DecisionEngine(make_repository(tmp_path))
+
+    result = engine.decide(answer)
+
+    assert result.category == ResponseCategory.CONFIRMATION
+    assert result.source.value == "RULE"
+
+
+def test_decision_engine_does_not_treat_negated_open_command_as_confirmation(tmp_path):
+    engine = DecisionEngine(make_repository(tmp_path))
+
+    result = engine.decide("не відкривай")
+
+    assert result.category == ResponseCategory.REJECTION
+
+
+def test_decision_engine_recognizes_confirmation_word_without_semantic_model(
+    tmp_path,
+    monkeypatch,
+):
+    engine = DecisionEngine(make_repository(tmp_path))
+    monkeypatch.setattr(
+        engine.semantic_analyzer,
+        "analyze",
+        lambda *_args, **_kwargs: pytest.fail(
+            "Exact confirmation should not use semantic analysis"
+        ),
+    )
+
+    result = engine.decide("підтверджую")
+
+    assert result.category == ResponseCategory.CONFIRMATION
+    assert result.source.value == "PATTERN"
 
 
 @pytest.mark.parametrize(
@@ -155,7 +249,7 @@ def test_repository_adds_missing_defaults_to_existing_database(tmp_path):
     repository.seed_default_patterns()
 
     assert repository.find_by_pattern("звісно") is not None
-    assert len(repository.get_all()) == 46
+    assert len(repository.get_all()) == 47
 
 
 def test_decision_engine_matches_short_words_at_word_boundaries(tmp_path):

@@ -1,8 +1,40 @@
-from PyQt6.QtCore import Qt
-from PyQt6.QtGui import QPixmap
-from PyQt6.QtWidgets import QFrame, QHBoxLayout, QLabel, QVBoxLayout
+import math
+
+from PyQt6.QtCore import QRectF, Qt, QTimer
+from PyQt6.QtGui import QColor, QPainter, QPixmap
+from PyQt6.QtWidgets import QFrame, QHBoxLayout, QLabel, QVBoxLayout, QWidget
 
 from ..icon_loader import load_pixmap
+
+
+class LoadingDot(QWidget):
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.setFixedSize(16, 16)
+        self._phase = 0.0
+        self._timer = QTimer(self)
+        self._timer.timeout.connect(self._advance)
+        self._timer.start(45)
+
+    def _advance(self) -> None:
+        self._phase = (self._phase + 0.12) % (2 * math.pi)
+        self.update()
+
+    def paintEvent(self, _event) -> None:
+        pulse = (math.sin(self._phase) + 1) / 2
+        radius = 3.0 + pulse
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(QColor(112, 132, 255, round(110 + 145 * pulse)))
+        painter.drawEllipse(
+            QRectF(
+                (self.width() - radius * 2) / 2,
+                (self.height() - radius * 2) / 2,
+                radius * 2,
+                radius * 2,
+            )
+        )
 
 
 # ============================ КАРТКА ПОВІДОМЛЕННЯ ЧАТУ ============================
@@ -18,6 +50,7 @@ class ChatCard(QFrame):
         is_user: bool = False,
         status: str | None = None,
         status_icon: str | None = None,
+        loading: bool = False,
     ) -> None:
         super().__init__()
         self.setObjectName("userCard" if is_user else "assistantCard")
@@ -48,6 +81,10 @@ class ChatCard(QFrame):
         header_layout.addWidget(author_label)
         header_layout.addStretch()
 
+        if loading:
+            self.loading_dot = LoadingDot(self)
+            header_layout.addWidget(self.loading_dot)
+
         # Необов'язковий рядок статусу праворуч у заголовку картки.
         if status:
             if status_icon:
@@ -63,13 +100,15 @@ class ChatCard(QFrame):
 
         text_layout.addLayout(header_layout)
 
-        body_label = QLabel(body)
-        body_label.setObjectName("messageBody")
-        body_label.setWordWrap(True)
-        text_layout.addWidget(body_label)
+        if body:
+            body_label = QLabel(body)
+            body_label.setObjectName("messageBody")
+            body_label.setWordWrap(True)
+            text_layout.addWidget(body_label)
 
-        time_label = QLabel(time)
-        time_label.setObjectName("messageTime")
-        text_layout.addWidget(time_label)
+        if not loading:
+            time_label = QLabel(time)
+            time_label.setObjectName("messageTime")
+            text_layout.addWidget(time_label)
 
         layout.addLayout(text_layout, 1)

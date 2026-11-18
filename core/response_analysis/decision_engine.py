@@ -31,6 +31,10 @@ class DecisionEngine:
         "можеш відкрити",
         "можете відкривати",
         "можете відкрити",
+        "відкрий",
+        "відкривай",
+        "відкрийте",
+        "відкривайте",
         "можеш запускати",
         "можеш запустити",
         "можете запускати",
@@ -110,7 +114,7 @@ class DecisionEngine:
                 (
                     phrase
                     for phrase in self.PERMISSION_CONFIRMATION_PHRASES
-                    if phrase in normalized
+                    if re.search(rf"(?<!\w){re.escape(phrase)}(?!\w)", normalized)
                 ),
                 None,
             )

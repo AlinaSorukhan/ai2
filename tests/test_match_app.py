@@ -11,6 +11,7 @@ from utils.match_app import (
     find_best_match,
     find_exact_match,
     find_similar_apps,
+    get_open_apps,
 )
 
 
@@ -178,3 +179,38 @@ def test_prefix_matches_are_included_even_below_similarity_threshold():
     assert find_similar_apps("not", apps, threshold=0.99) == [
         ("Notepad++", "C:\\Apps\\notepad++.exe")
     ]
+
+
+def test_get_open_apps_filters_by_running_process_names(monkeypatch):
+    apps = {
+        "Steam": r"C:\Apps\steam.exe",
+        "Steam Tools": r"C:\Apps\steam-tools.exe",
+        "Spotify": "appx://SpotifyPackage!Spotify",
+    }
+    monkeypatch.setattr(
+        match_app,
+        "_get_running_process_names",
+        lambda: {"steam", "spotify"},
+    )
+
+    assert get_open_apps(apps) == {
+        "Steam": r"C:\Apps\steam.exe",
+        "Spotify": "appx://SpotifyPackage!Spotify",
+    }
+
+
+def test_get_running_process_names_parses_windows_tasklist(monkeypatch):
+    completed = match_app.subprocess.CompletedProcess(
+        args=["tasklist"],
+        returncode=0,
+        stdout='"steam.exe","123","Console","1","42 K"\r\n',
+        stderr="",
+    )
+    monkeypatch.setattr(match_app.platform, "system", lambda: "Windows")
+    monkeypatch.setattr(
+        match_app.subprocess,
+        "run",
+        lambda *_args, **_kwargs: completed,
+    )
+
+    assert match_app._get_running_process_names() == {"steam"}

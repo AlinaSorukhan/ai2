@@ -1,5 +1,9 @@
+import csv
 import difflib
+import os
+import platform
 import re
+import subprocess
 from collections.abc import Iterable, Mapping
 
 from django.db.models import F
@@ -33,6 +37,60 @@ def get_known_apps():
 
         apps[command.name] = path
     return apps
+
+
+def _get_running_process_names() -> set[str]:
+    system = platform.system()
+    if system == "Windows":
+        args = ["tasklist", "/FO", "CSV", "/NH"]
+    elif system in {"Darwin", "Linux"}:
+        args = ["ps", "-A", "-o", "comm="]
+    else:
+        raise NotImplementedError(
+            f"Перевірка запущених програм не підтримується в {system}"
+        )
+
+    result = subprocess.run(
+        args,
+        capture_output=True,
+        text=True,
+        timeout=15,
+        check=False,
+    )
+    if result.returncode != 0:
+        message = result.stderr.strip() or "Не вдалося отримати список процесів"
+        raise RuntimeError(message)
+
+    if system == "Windows":
+        names = (row[0] for row in csv.reader(result.stdout.splitlines()) if row)
+    else:
+        names = result.stdout.splitlines()
+
+    return {
+        _normalize_app_name(os.path.splitext(os.path.basename(name.strip()))[0])
+        for name in names
+        if name.strip()
+    }
+
+
+def get_open_apps(apps: Mapping[str, str]) -> dict[str, str]:
+    if not apps:
+        return {}
+
+    running_names = _get_running_process_names()
+    return {
+        name: path
+        for name, path in apps.items()
+        if (
+            _normalize_app_name(name) in running_names
+            or (
+                not path.casefold().startswith("appx://")
+                and _normalize_app_name(
+                    os.path.splitext(os.path.basename(path))[0]
+                ) in running_names
+            )
+        )
+    }
 
 
 def sync_installed_apps(apps: Mapping[str, str] | None = None) -> int:

@@ -1,4 +1,5 @@
 import os
+import threading
 from unittest.mock import Mock, patch
 
 import pytest
@@ -11,7 +12,13 @@ django.setup()
 
 from core.management.commands import run_assistant
 from core.management.commands.run_assistant import Command
-from core.response_analysis import ResponseAnalysis, ResponseCategory, ResponseSource
+from core.response_analysis import (
+    ResponseAnalysis,
+    ResponseAnalyzer,
+    ResponseCategory,
+    ResponseRepository,
+    ResponseSource,
+)
 from utils.file_explorer import (
     ExplorerTab,
     close_explorer_tab,
@@ -20,10 +27,12 @@ from utils.file_explorer import (
     get_open_explorer_tabs,
     find_file_targets,
     find_file_targets_in_folder,
+    find_named_file_targets,
     find_similar_file_targets,
     get_active_explorer_path,
     get_active_explorer_subfolders,
     is_current_folder_request,
+    parse_find_file_command,
     navigate_explorer_back,
     navigate_explorer_to,
     open_target,
@@ -66,6 +75,20 @@ def test_parse_open_target_command(spoken_text, expected):
     assert parse_open_target_command(spoken_text) == expected
 
 
+@pytest.mark.parametrize(
+    ("spoken_text", "expected"),
+    [
+        ("Знайди файл звіт.docx", "звіт.docx"),
+        ("Знайти документ «звіт»", "звіт"),
+        ("Відшукай файл", ""),
+        ("Відкрий файл звіт.docx", None),
+        ("Знайди папку Звіти", None),
+    ],
+)
+def test_parse_find_file_command(spoken_text, expected):
+    assert parse_find_file_command(spoken_text) == expected
+
+
 def test_find_file_target_by_path_and_by_name(tmp_path):
     target = tmp_path / "звіт.docx"
     target.write_text("test", encoding="utf-8")
@@ -76,6 +99,51 @@ def test_find_file_target_by_path_and_by_name(tmp_path):
         roots=[str(tmp_path)],
         expected_kind="file",
     ) == [str(target)]
+
+
+def test_find_named_file_target_searches_nested_folders_without_depth_limit(tmp_path):
+    folder = tmp_path
+    for index in range(6):
+        folder = folder / f"level-{index}"
+    folder.mkdir(parents=True)
+    target = folder / "report.docx"
+    target.touch()
+
+    assert find_named_file_targets("report", roots=[str(tmp_path)]) == [str(target)]
+
+
+def test_find_named_file_target_stops_when_cancelled(tmp_path):
+    cancel_event = threading.Event()
+    cancel_event.set()
+
+    with pytest.raises(InterruptedError, match="Пошук файлів скасовано"):
+        find_named_file_targets(
+            "report.docx",
+            roots=[str(tmp_path)],
+            cancellation_event=cancel_event,
+        )
+
+
+def test_find_named_file_target_stops_when_cancelled_during_walk(tmp_path, monkeypatch):
+    (tmp_path / "first.docx").touch()
+    (tmp_path / "second.docx").touch()
+    cancel_event = threading.Event()
+
+    def cancel_after_first_match_attempt(_path, _target_name):
+        cancel_event.set()
+        return False
+
+    monkeypatch.setattr(
+        "utils.file_explorer._matches_target_name",
+        cancel_after_first_match_attempt,
+    )
+
+    with pytest.raises(InterruptedError, match="Пошук файлів скасовано"):
+        find_named_file_targets(
+            "report.docx",
+            roots=[str(tmp_path)],
+            cancellation_event=cancel_event,
+        )
 
 
 def test_find_file_target_without_extension(tmp_path):
@@ -315,6 +383,113 @@ def test_file_open_command_uses_default_application(tmp_path):
         command.doing_task(f"відкрий файл {target}")
 
     open_target.assert_called_once_with(str(target))
+
+
+def test_find_file_command_opens_containing_folder(tmp_path):
+    target = tmp_path / "nested" / "report.docx"
+    command = make_command()
+
+    with (
+        patch.object(
+            run_assistant,
+            "find_named_file_targets",
+            return_value=[str(target)],
+        ) as find_file,
+        patch.object(run_assistant, "open_target") as open_target,
+        patch.object(run_assistant, "voicing_and_printing_answer"),
+    ):
+        command.doing_task("знайди файл report.docx")
+
+    find_file.assert_called_once_with("report.docx", cancellation_event=None)
+    open_target.assert_called_once_with(str(target.parent))
+
+
+def test_find_file_command_keeps_search_mode_when_name_is_provided_later(tmp_path):
+    target = tmp_path / "nested" / "report.docx"
+    command = make_command()
+
+    with (
+        patch.object(
+            run_assistant,
+            "find_named_file_targets",
+            return_value=[str(target)],
+        ) as find_file,
+        patch.object(run_assistant, "open_target") as open_target,
+        patch.object(run_assistant, "voicing_and_printing_answer"),
+    ):
+        command.doing_task("знайди файл")
+        assert command.pending_file is not None
+        assert command.pending_file["open_parent"] is True
+        command.doing_task("report.docx")
+
+    find_file.assert_called_once_with("report.docx", cancellation_event=None)
+    open_target.assert_called_once_with(str(target.parent))
+
+
+def test_find_file_selection_opens_selected_file_parent(tmp_path):
+    first = str(tmp_path / "First" / "report.docx")
+    second = str(tmp_path / "Second" / "report.docx")
+    command = make_command()
+    command.pending_file = {
+        "awaiting_selection_confirmation": True,
+        "targets": [first, second],
+        "selected_target": second,
+        "open_parent": True,
+    }
+    command.analyze_response = Mock(
+        return_value=ResponseAnalysis(
+            ResponseCategory.CONFIRMATION,
+            1.0,
+            source=ResponseSource.PATTERN,
+        )
+    )
+
+    with (
+        patch.object(run_assistant, "open_target") as open_target,
+        patch.object(run_assistant, "voicing_and_printing_answer"),
+    ):
+        command.doing_task("так")
+
+    open_target.assert_called_once_with(os.path.dirname(second))
+    assert command.pending_file is None
+
+
+@pytest.mark.parametrize("answer", ["підтверджую", "відкрий", "відкривай"])
+def test_file_selection_confirmation_accepts_open_command_without_semantic_model(
+    tmp_path,
+    monkeypatch,
+    answer,
+):
+    command = make_command()
+    repository = ResponseRepository(f"sqlite:///{tmp_path / 'responses.sqlite3'}")
+    analyzer = ResponseAnalyzer(repository)
+    monkeypatch.setattr(
+        analyzer.decision_engine.semantic_analyzer,
+        "analyze",
+        lambda *_args, **_kwargs: pytest.fail(
+            "Known confirmation should not use semantic analysis"
+        ),
+    )
+    command.response_analyzer = analyzer
+    target_folder = str(tmp_path / "folder")
+    command.pending_file = {
+        "awaiting_selection_confirmation": True,
+        "targets": [os.path.join(target_folder, "report.docx")],
+        "selected_target": os.path.join(target_folder, "report.docx"),
+        "open_parent": True,
+    }
+
+    try:
+        with (
+            patch.object(run_assistant, "open_target") as open_target,
+            patch.object(run_assistant, "voicing_and_printing_answer"),
+        ):
+            command.doing_task(answer)
+
+        open_target.assert_called_once_with(target_folder)
+        assert command.pending_file is None
+    finally:
+        repository.engine.dispose()
 
 
 @pytest.mark.parametrize("spoken_name", ["Провідник", "провід"])
