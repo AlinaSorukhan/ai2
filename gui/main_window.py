@@ -1,7 +1,14 @@
-from typing import Any
+import contextlib
+import io
+import os
+import sys
+import threading
+from datetime import datetime
+from pathlib import Path
+from typing import Any, cast
 
-from PyQt6.QtCore import QPoint, Qt, QThreadPool
-from PyQt6.QtGui import QKeySequence, QMouseEvent, QShortcut
+from PyQt6.QtCore import QObject, QPoint, QRunnable, QSize, Qt, QThreadPool, QTimer, pyqtSignal
+from PyQt6.QtGui import QIcon, QKeyEvent, QMouseEvent, QPixmap, QResizeEvent, QKeySequence, QShortcut
 from PyQt6.QtWidgets import (
     QMainWindow,
     QPushButton,
@@ -12,8 +19,7 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 
-from .styles import STYLESHEET
-from .widgets.chat_panel import ChatPanel
+from .icon_loader import icon_path as resolve_icon_path, load_pixmap
 from .widgets.chat_widgets import ChatCard
 from utils.voicing_answer import GUI_TEXT_MODE
 
@@ -286,6 +292,18 @@ class MainWindow(QMainWindow):
         self._initialization_worker.signals.finished.connect(self._backend_initialized)
         self._thread_pool.start(self._initialization_worker)
 
+    # ============================ РОБОТА З ІКОНКАМИ ============================
+    def icon_path(self, name: str) -> Path:
+        return resolve_icon_path(name)
+
+    def make_icon(self, name: str, size: int = 20) -> QIcon:
+        pixmap = self.make_pixmap(name, size)
+        return QIcon(pixmap)
+
+    def make_pixmap(self, name: str, size: int) -> QPixmap:
+        return load_pixmap(self.icon_path(name), size)
+
+    # ============================ ОСНОВНА КОМПОНОВКА ВІКНА ============================
     def _build_ui(self) -> None:
         root = QWidget()
         root_layout = QVBoxLayout(root)
@@ -318,6 +336,57 @@ class MainWindow(QMainWindow):
         root_layout.addWidget(body, 1)
 
         self.setCentralWidget(root)
+
+    # ============================ ВЕРХНЯ ПАНЕЛЬ / TITLE BAR ============================
+    def _create_title_bar(self) -> QWidget:
+        bar = QFrame()
+        bar.setObjectName("titleBar")
+        bar.setFixedHeight(49)
+        layout = QHBoxLayout(bar)
+        layout.setContentsMargins(12, 0, 5, 0)
+        layout.setSpacing(8)
+        layout.setAlignment(Qt.AlignmentFlag.AlignVCenter)
+
+        # Верхня ліва частина без окремого фонового прямокутника.
+        brand_icon = QLabel()
+        brand_icon.setPixmap(self.make_pixmap("branding/logo_assistant.svg", 22))
+        brand_icon.setFixedWidth(28)
+        brand_icon.setStyleSheet("background: transparent; border: none;")
+        layout.addWidget(brand_icon)
+
+        brand = QLabel("Поліна")
+        brand.setObjectName("brand")
+        brand.setStyleSheet("background: transparent; border: none;")
+        layout.addWidget(brand)
+
+        # Права група керування вікном: повноформатні кнопки на всю висоту заголовка.
+        actions = QWidget()
+        actions.setFixedSize(132, 49)
+        actions.setStyleSheet("background: transparent; border: none;")
+        actions_layout = QHBoxLayout(actions)
+        actions_layout.setContentsMargins(0, 0, 0, 0)
+        actions_layout.setSpacing(4)
+
+        title_actions = (
+            ("window/hide_window.svg", self.showMinimized),
+            ("window/full_window.svg", self.toggle_maximize),
+            ("window/close_winow.svg", self.close),
+        )
+        for icon_name, callback in title_actions:
+            button = QToolButton()
+            button.setIcon(self.make_icon(icon_name, 40))
+            button.setIconSize(QSize(40, 49))
+            button.setFixedSize(40, 49)
+            button.setProperty("class", "titleButton")
+            button.setStyleSheet(
+                "QToolButton { border: none; background: transparent; }"
+                "QToolButton:hover { background: transparent; }"
+            )
+            button.clicked.connect(callback)
+            actions_layout.addWidget(button, 0, Qt.AlignmentFlag.AlignVCenter)
+
+        layout.addWidget(actions, 0, Qt.AlignmentFlag.AlignVCenter)
+        return bar
 
     def toggle_maximize(self) -> None:
         if self.isMaximized():
@@ -362,9 +431,9 @@ class MainWindow(QMainWindow):
         # Основні розділи бічної панелі.
         sidebar_buttons = []
         for icon_name, title, active in (
-            ("home.svg", "Головна", True),
-            ("user_ico.svg", "Профіль", False),
-            ("settings.svg", "Налаштування", False),
+            ("navigation/home.svg", "Головна", True),
+            ("chat/user_ico.svg", "Профіль", False),
+            ("navigation/settings.svg", "Налаштування", False),
         ):
             button = QToolButton()
             button.setIcon(self.make_icon(icon_name, 22))
@@ -466,7 +535,25 @@ class MainWindow(QMainWindow):
         is_user: bool = False,
         status: str | None = None,
     ) -> ChatCard:
-        return self.chat.add_card(author, body, is_user=is_user, status=status)
+        if self._chat_layout is None:
+            raise RuntimeError("Chat area is not initialized")
+
+        icon_name = "chat/user_ico.svg" if is_user else "chat/bot_ico.svg"
+        if author == "System":
+            icon_name = "chat/info.svg"
+        card = ChatCard(
+            author,
+            body.strip(),
+            datetime.now().strftime("%H:%M"),
+            str(self.icon_path(icon_name)),
+            is_user=is_user,
+            status=status,
+            status_icon=str(self.icon_path("status/status.svg")) if status else None,
+        )
+        insert_at = max(0, self._chat_layout.count() - 1)
+        self._chat_layout.insertWidget(insert_at, card)
+        self._scroll_chat_to_bottom()
+        return card
 
     def _remove_chat_card(self, card: ChatCard | None) -> None:
         if card is None:
@@ -587,9 +674,104 @@ class MainWindow(QMainWindow):
         self._initialization_status_card = None
 
     def _set_commands_enabled(self, enabled: bool) -> None:
-        self.search.setEnabled(enabled)
-        self.composer.set_prompt_enabled(enabled)
+        if self._prompt_input is not None:
+            self._prompt_input.setEnabled(enabled)
+        if self._search_field is not None:
+            self._search_field.setEnabled(enabled)
+        if self._keyboard_button is not None:
+            self._keyboard_button.setEnabled(enabled)
+        if self._mic_button is not None:
+            self._mic_button.setEnabled(enabled)
 
+    def _set_microphone_icon(self, active: bool) -> None:
+        if self._mic_button is None:
+            return
+        icon_name = "controls/micro.svg" if active else "controls/micro_off.svg"
+        self._mic_button.setIcon(self.make_icon(icon_name, 20))
+
+    # ============================ РЯДОК ПОШУКУ НАД ЧАТОМ ============================
+    def _create_search_bar(self) -> QWidget:
+        bar = QWidget()
+        bar.setObjectName("searchBar")
+        layout = QHBoxLayout(bar)
+        layout.setContentsMargins(23, 8, 12, 8)
+        layout.setSpacing(10)
+
+        # Іконка пошуку ліворуч у рядку пошуку.
+        search_icon = QLabel()
+        search_icon.setPixmap(self.make_pixmap("controls/search.svg", 16))
+        layout.addWidget(search_icon)
+
+        search = QLineEdit()
+        search.setObjectName("searchField")
+        search.setPlaceholderText("Search files, repositories, or start speaking")
+        search.setFixedHeight(42)
+        search.returnPressed.connect(lambda: self.send_message(search.text(), clear_search=search))
+        self._search_field = search
+        layout.addWidget(search, 1)
+
+        filter_button = QPushButton("Ctrl + M")
+        filter_button.setObjectName("searchButton")
+        filter_button.clicked.connect(self.start_microphone_input)
+        layout.addWidget(filter_button)
+        return bar
+
+    # ============================ НИЖНЯ ПАНЕЛЬ ВВЕДЕННЯ ============================
+    def _create_composer(self) -> QWidget:
+        # Нижня панель вводу має динамічно зростати разом із текстом.
+        area = QWidget()
+        area.setObjectName("composerArea")
+
+        layout = QVBoxLayout(area)
+        layout.setContentsMargins(16, 12, 16, 10)
+        layout.setSpacing(9)
+        layout.setAlignment(Qt.AlignmentFlag.AlignVCenter)
+        area.setMaximumHeight(300)
+
+        composer = QFrame()
+        composer.setObjectName("composer")
+        composer_layout = QHBoxLayout(composer)
+        composer_layout.setContentsMargins(12, 4, 12, 4)
+        composer_layout.setSpacing(8)
+
+        # Ліва кнопка системної дієї прив’язана до нижнього краю поля.
+        keyboard = QPushButton()
+        keyboard.setIcon(self.make_icon("controls/system_enter.svg", 20))
+        keyboard.setIconSize(QSize(20, 20))
+        keyboard.setObjectName("keyboardButton")
+        keyboard.setFixedSize(32, 32)
+        keyboard.clicked.connect(lambda: self.send_message(prompt.toPlainText(), clear_prompt=prompt))
+        self._keyboard_button = keyboard
+        composer_layout.addWidget(keyboard, 0, Qt.AlignmentFlag.AlignBottom)
+
+        # Багаторядкове поле автоматично розширює composer, але прокручується після max-height.
+        prompt = AutoResizeTextEdit()
+        prompt.submitted.connect(lambda: self.send_message(prompt.toPlainText(), clear_prompt=prompt))
+        self._prompt_input = prompt
+        composer_layout.addWidget(prompt, 1, Qt.AlignmentFlag.AlignVCenter)
+
+        mic = QPushButton()
+        mic.setIcon(self.make_icon("controls/micro_off.svg", 20))
+        mic.setIconSize(QSize(20, 20))
+        mic.setObjectName("micButton")
+        mic.setFixedSize(32, 32)
+        mic.clicked.connect(self.start_microphone_input)
+        self._mic_button = mic
+        composer_layout.addWidget(mic, 0, Qt.AlignmentFlag.AlignBottom)
+
+        layout.addWidget(composer, 0, Qt.AlignmentFlag.AlignVCenter)
+
+        def resize_composer_area() -> None:
+            input_height = prompt.height()
+            composer_height = max(50, input_height + 8)
+            composer.setFixedHeight(composer_height)
+            area.updateGeometry()
+
+        prompt.textChanged.connect(resize_composer_area)
+        resize_composer_area()
+        return area
+
+    # ============================ ПЕРЕТЯГУВАННЯ ВІКНА ============================
     def mousePressEvent(self, event: QMouseEvent | None) -> None:
         if event is not None and event.button() == Qt.MouseButton.LeftButton:
             self._drag_position = (
