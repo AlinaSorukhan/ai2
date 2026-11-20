@@ -6,6 +6,16 @@ import threading
 from datetime import datetime
 from pathlib import Path
 from typing import Any, cast
+from gui.icon_loader import icon_path
+from gui.styles import STYLESHEET
+from gui.widgets.chat_panel import ChatPanel
+from gui.widgets.chat_widgets import ChatCard
+from gui.widgets.composer import Composer
+from gui.widgets.input import AutoResizeTextEdit
+from gui.widgets.search_bar import SearchBar
+from gui.widgets.sidebar import Sidebar
+from gui.widgets.title_bar import TitleBar
+from gui.workers import BackendHealthWorker, CommandWorker
 
 from PyQt6.QtCore import QObject, QPoint, QRunnable, QSize, Qt, QThreadPool, QTimer, pyqtSignal
 from PyQt6.QtGui import QIcon, QKeyEvent, QMouseEvent, QPixmap, QResizeEvent, QKeySequence, QShortcut
@@ -17,6 +27,12 @@ from PyQt6.QtWidgets import (
     QToolButton,
     QVBoxLayout,
     QWidget,
+    QTextEdit,
+    QSplitter,
+    QHBoxLayout,
+    QFrame,
+    QLineEdit,
+    QLabel,
 )
 
 from .icon_loader import icon_path as resolve_icon_path, load_pixmap
@@ -530,7 +546,10 @@ class MainWindow(QMainWindow):
             )
 
         language_button.clicked.connect(toggle_language)
-        layout.addWidget(language_button, 0, Qt.AlignmentFlag.AlignHCenter)
+        layout.addWidget(
+            language_button,
+            0,
+            Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignBottom,)
 
         return sidebar
 
@@ -577,26 +596,16 @@ class MainWindow(QMainWindow):
         status: str | None = None,
         loading: bool = False,
     ) -> ChatCard:
-        if self._chat_layout is None:
-            raise RuntimeError("Chat area is not initialized")
-
-        icon_name = "chat/user_ico.svg" if is_user else "chat/bot_ico.svg"
-        if author == "System":
-            icon_name = "chat/info.svg"
-        card = ChatCard(
+        return self.chat.add_card(
             author,
-            body.strip(),
-            datetime.now().strftime("%H:%M"),
-            str(self.icon_path(icon_name)),
+            body,
             is_user=is_user,
             status=status,
-            status_icon=str(self.icon_path("status/status.svg")) if status else None,
-            loading=loading,
         )
-        insert_at = max(0, self._chat_layout.count() - 1)
-        self._chat_layout.insertWidget(insert_at, card)
-        self._scroll_chat_to_bottom()
-        return card
+
+    def _scroll_chat_to_bottom(self) -> None:
+        self.chat.scroll_to_bottom()
+
 
     def _remove_chat_card(self, card: ChatCard | None) -> None:
         if card is None:

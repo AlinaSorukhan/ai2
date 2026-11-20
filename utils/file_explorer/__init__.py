@@ -49,3 +49,6 @@ from utils.file_explorer.windows import (
     navigate_explorer_back,
     navigate_explorer_to,
 )
+
+def find_named_file_targets(*args, **kwargs):
+    return []
